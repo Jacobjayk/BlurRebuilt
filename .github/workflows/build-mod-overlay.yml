@@ -1,0 +1,196 @@
+name: Build Mod Overlay
+
+on:
+  push:
+    branches:
+      - master
+      - mod-overlay
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build BlurRebuilt with Mod Overlay
+    runs-on: windows-2025
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Find Visual Studio
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $major = (& $vswhere -latest -products * -property installationVersion).Split('.')[0]
+          $generator = @{ '18' = 'Visual Studio 18 2026'; '17' = 'Visual Studio 17 2022' }[$major]
+          if (-not $generator) { throw "Unsupported Visual Studio version $major at $vs" }
+          $cmake = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+          if (-not (Test-Path $cmake)) { $cmake = (Get-Command cmake).Source }
+          Write-Host "Visual Studio $major at $vs; $generator; $cmake"
+          "BLUR_GENERATOR=$generator" >> $env:GITHUB_ENV
+          "BLUR_CMAKE=$cmake" >> $env:GITHUB_ENV
+
+      - name: Download vendor packages
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dl = '_work/vendor_dl'
+          $vendor = '_work/vendor'
+          New-Item -ItemType Directory -Force $dl, $vendor | Out-Null
+          function Get-Checked($urls, $file, $sha1) {
+            foreach ($url in $urls) {
+              curl.exe -fsSL --retry 3 --retry-delay 10 -o "$dl/$file" $url
+              if ($LASTEXITCODE -eq 0) { break }
+              Write-Host "Download failed from $url"
+            }
+            $actual = (Get-FileHash "$dl/$file" -Algorithm SHA1).Hash
+            if ($actual -ne $sha1) { throw "$file SHA1 $actual, expected $sha1" }
+          }
+          Get-Checked @('https://www.nuget.org/api/v2/package/Microsoft.DXSDK.D3DX/9.29.952.8') d3dx.zip B4A86540D0E52C014BCD41A7499C31BA6252D2F7
+          Expand-Archive "$dl/d3dx.zip" "$vendor/d3dx"
+          Get-Checked @('https://github.com/kcat/openal-soft/releases/download/1.24.3/openal-soft-1.24.3-bin.zip') openal.zip BB1245E3E0809370EADF7121A8B626F7132AA358
+          Expand-Archive "$dl/openal.zip" $vendor
+          Get-Checked @('https://downloads.sourceforge.net/project/libjpeg/libjpeg/6b/jpegsrc.v6b.tar.gz', 'https://www.ijg.org/files/jpegsrc.v6b.tar.gz') jpeg.tar.gz 7079F0D6C42FAD0CFBA382CF6AD322ADD1ACE8F9
+          tar -xzf "$dl/jpeg.tar.gz" -C $vendor
+          if (-not (Test-Path "$vendor/jpeg-6b/jpeglib.h") -or -not (Test-Path "$vendor/openal-soft-1.24.3-bin/include/AL/al.h") -or -not (Test-Path "$vendor/d3dx/build/native/include")) { throw 'Vendor layout differs from blur_common.cmake' }
+
+      - name: Restore x64 OpenSSL
+        id: openssl
+        uses: actions/cache@v4
+        with:
+          path: _work/vendor_x64/openssl-x64
+          key: openssl-0.9.8i-x64-${{ hashFiles('tools/demonware_cmake/build_openssl_x64.cmd') }}
+
+      - name: Build x64 OpenSSL 0.9.8i
+        if: steps.openssl.outputs.cache-hit != 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dl = '_work/vendor_x64/dl'
+          New-Item -ItemType Directory -Force $dl | Out-Null
+          curl.exe -fsSL --retry 3 --retry-delay 10 -o "$dl/openssl.tar.gz" https://www.openssl.org/source/old/0.9.x/openssl-0.9.8i.tar.gz
+          $actual = (Get-FileHash "$dl/openssl.tar.gz" -Algorithm SHA1).Hash
+          if ($actual -ne 'B2E029CFB68BF32EAE997D60317A40945DB5A65F') { throw "openssl SHA1 $actual" }
+          tar -xzf "$dl/openssl.tar.gz" -C _work/vendor_x64
+          if (-not (Test-Path _work/vendor_x64/openssl-0.9.8i/Configure)) { throw 'OpenSSL source did not extract' }
+          $global:LASTEXITCODE = 0
+          cmd /c "tools\demonware_cmake\build_openssl_x64.cmd _work\vendor_x64\openssl-0.9.8i _work\vendor_x64\openssl-x64"
+          if ($LASTEXITCODE -ne 0) { throw "build_openssl_x64.cmd exited $LASTEXITCODE" }
+
+      - name: Generate build files
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $J = 'tools/jam2cmake'
+          New-Item -ItemType Directory -Force _work/build | Out-Null
+          function Invoke-Py { python @args; if ($LASTEXITCODE -ne 0) { throw "python $args exited $LASTEXITCODE" } }
+          Invoke-Py "$J/jamextract.py" --top . --root code/amax/game/jamfile.jam --target WIN32 --platform PC --build Speed --out _work/build/targets_pc_speed.json
+          $cp = Get-ChildItem code/mercury/library, code/amax/game -Recurse -File -Include *.cp, *.cv, *.sp | ForEach-Object FullName
+          Invoke-Py "$J/cpgen.py" @cp
+          Invoke-Py "$J/shadergen.py" --json _work/build/targets_pc_speed.json --out _work/build/gen/shaders
+          Invoke-Py "$J/luabundle.py" --json _work/build/targets_pc_speed.json --out _work/build/gen/blobs/amax_lua_bundle.cpp
+          Invoke-Py "$J/gen_cmake.py" --json _work/build/targets_pc_speed.json --out cmake/targets.cmake
+          git diff --ignore-cr-at-eol --exit-code --stat -- cmake/targets.cmake
+          if ($LASTEXITCODE -ne 0) { Write-Host '::warning::cmake/targets.cmake differs from the jamfiles; building the regenerated one' }
+
+      - name: Identify fxc
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x86\fxc.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'fxc.exe not found' }
+          $id = (Get-FileHash $fxc.FullName -Algorithm SHA1).Hash.Substring(0, 12)
+          Write-Host "Found fxc.exe at $($fxc.FullName) (ID: $id)"
+          "BLUR_FXC_ID=$id" >> $env:GITHUB_ENV
+
+      - name: Restore compiled shaders
+        id: shaders
+        uses: actions/cache@v4
+        with:
+          path: |
+            _work/build/gen/fx11
+            _work/build/gen/dx11_builtins
+          key: dx11-shaders-${{ env.BLUR_FXC_ID }}-${{ hashFiles('code/amax/game/**/*.fx', 'code/amax/game/**/*.vsh', 'code/amax/game/**/*.psh', 'code/amax/game/**/*.h', 'code/amax/game/**/*.jam', 'code/mercury/library/**/*.jam', 'code/mercury/library/graphics/**/*.fx', 'code/mercury/library/graphics/**/*.vsh', 'code/mercury/library/graphics/**/*.psh', 'code/mercury/library/graphics/**/*.h', 'code/mercury/library/graphics/**/*.samplers', 'code/mercury/library/ui/**/*.vsh', 'code/mercury/library/ui/**/*.psh', 'code/mercury/library/ui/**/*.h', 'tools/dx11_fxcompile/*.py', 'tools/dx11_shadercompile/*.py', 'tools/jam2cmake/jamextract.py', 'tools/jam2cmake/cpgen.py', 'cmake/dx11.cmake') }}
+
+      - name: Build Master Amax.exe and fx11
+        env:
+          BLUR_BUILD_SHADERS: ${{ steps.shaders.outputs.cache-hit == 'true' && 'OFF' || 'ON' }}
+        run: |
+          Write-Host "Configuring CMake with BLUR_BUILD_SHADERS=$env:BLUR_BUILD_SHADERS..."
+          & $env:BLUR_CMAKE -S . -B _work/build/vs -G $env:BLUR_GENERATOR -A x64 "-DBLUR_BUILD_SHADERS=$env:BLUR_BUILD_SHADERS"
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure exited with error code $LASTEXITCODE" }
+
+          Write-Host "Building Amax target (MinSizeRel)..."
+          & $env:BLUR_CMAKE --build _work/build/vs --config MinSizeRel --target Amax -- -m '-v:m' -nologo *> _work/build/amax.log
+          $code = $LASTEXITCODE
+          python tools/jam2cmake/errsum.py _work/build/amax.log
+          if ($code -ne 0) {
+            Get-Content _work/build/amax.log -Tail 60
+            throw "CMake build exited with error code $code"
+          }
+
+      - name: Package build outputs and generate manifest
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = '_work/package'
+          $effects = '_work/build/gen/fx11/effects'
+          New-Item -ItemType Directory -Force "$stage/fx11" | Out-Null
+
+          Copy-Item _work/build/vs/MinSizeRel/Amax.exe "$stage/BlurRebuilt.exe"
+          Copy-Item _work/build/vs/amax_client_host/MinSizeRel/AmaxClientHost.exe "$stage/AmaxClientHost.exe"
+          Copy-Item README.md "$stage/README.md"
+
+          $root = (Resolve-Path $effects).Path
+          Get-ChildItem $effects -Recurse -File | Where-Object { $_.Name -in 'effects.index', 'effects.samplers' -or $_.Extension -eq '.fxo' } | ForEach-Object {
+            $target = Join-Path "$stage/fx11" $_.FullName.Substring($root.Length + 1)
+            New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
+            Copy-Item $_.FullName $target
+          }
+
+          if (-not (Test-Path "$stage/BlurRebuilt.exe")) { throw 'BlurRebuilt.exe missing from package stage' }
+          if (-not (Test-Path "$stage/AmaxClientHost.exe")) { throw 'AmaxClientHost.exe missing from package stage' }
+          if (-not (Test-Path "$stage/fx11/effects.index")) { throw 'fx11/effects.index missing' }
+
+          $exeHash = (Get-FileHash "$stage/BlurRebuilt.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hostHash = (Get-FileHash "$stage/AmaxClientHost.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $manifest = [ordered]@{
+            artifact_name = "BlurRebuilt-ModOverlay-Windows-x64"
+            commit_sha = $env:GITHUB_SHA
+            build_timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            configuration = "MinSizeRel"
+            platform = "x64"
+            cmake_generator = $env:BLUR_GENERATOR
+            fxc_id = $env:BLUR_FXC_ID
+            executable_sha256 = $exeHash
+            client_host_sha256 = $hostHash
+            blur_mod_overlay_enabled = $true
+          }
+
+          $manifestJson = $manifest | ConvertTo-Json -Depth 4
+          Set-Content -Path "$stage/build_info.json" -Value $manifestJson -Encoding utf8
+          Write-Host "Build manifest created:"
+          Write-Host $manifestJson
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlurRebuilt-ModOverlay-Windows-x64
+          path: _work/package
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: _work/build/amax.log
+          if-no-files-found: ignore
