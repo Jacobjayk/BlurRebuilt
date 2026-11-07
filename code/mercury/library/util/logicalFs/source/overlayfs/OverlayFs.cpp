@@ -633,6 +633,11 @@ C_OverlayLayer* C_OverlayFs::GetBestLayer(
 				continue;
 
 			//Jackpot, we've found an overlay layer containing our file.
+			if (strcmp(pLayer->GetName().Chars(), "BlurModOverlay") == 0)
+			{
+				LOGINFO(g_log, "[BlurModToolkit] Mod overlay hit: '%s' -> '%s'", filePath.Chars(), layerAbsoluteFilePath.Chars());
+			}
+
 			bestLayerAbsoluteFilePath = layerAbsoluteFilePath;
 			bestLayer = i;
 			pBestLayer = pLayer;

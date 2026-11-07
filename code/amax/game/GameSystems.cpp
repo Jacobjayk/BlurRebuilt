@@ -259,6 +259,35 @@ void C_GameSystems::CreateFsLayers()
 			&rsa);
 	}
 
+	// [BlurModToolkit] Mount optional user mod directory overlay
+	{
+		Sys::I_FileSystem& nativeFs = Sys::C_FileSystem::Instance();
+		Sys::C_FilePath modsDir = "mods";
+		Sys::C_FileInfo modDirInfo;
+		if (nativeFs.FileInfo(modsDir, &modDirInfo) && modDirInfo.m_FileType == Sys::E_FileType_Directory)
+		{
+			LogicalFs::C_OverlayLayer::C_Params modParams;
+			modParams.flags.layerType = LogicalFs::C_OverlayLayer::E_Type_Overlay;
+			modParams.flags.writable = false;
+
+			Sys::C_FilePath modsSrcPath = nativeFs.GetWorkingDirectory() + Sys::C_FilePath("/mods");
+			LogicalFs::C_OverlayFs& overlayFs = (LogicalFs::C_OverlayFs&)*m_pFileSystem;
+			overlayFs.AddLayer(
+				"/",
+				&nativeFs,
+				modsSrcPath,
+				modParams,
+				LogicalFs::E_MediaLayer_0,
+				"BlurModOverlay");
+
+			LOGINFO(gLog, "[BlurModToolkit] Mounted mods overlay directory at '%s'", modsSrcPath.Chars());
+		}
+		else
+		{
+			LOGINFO(gLog, "[BlurModToolkit] No 'mods' directory found; mod overlay disabled.");
+		}
+	}
+
 	//Not secure debug
 #ifdef ENABLE_DEBUG_SHADERS
 	{
