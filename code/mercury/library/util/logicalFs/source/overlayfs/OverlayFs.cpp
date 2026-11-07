@@ -1,4 +1,5 @@
 #include "LogicalFsPch.h"
+#include <stdio.h>
 #include <Core/Threads/Atomic.h>
 #include <System/Debug/Debug.h>
 #include <System/Serialise/FilePathHashOps.h>
@@ -37,6 +38,27 @@ Sys::I_File* C_OverlayFs::Open(
 			BIZ_ASSERT_FAIL("Writable layer logic broken!");
 			//Bail if we're attempting to write to a read-only layer.
 			return 0;
+		}
+
+		if (strcmp(pBestLayer->GetName().Chars(), "BlurModOverlay") == 0)
+		{
+			Sys::C_FileInfo fInfo;
+			U64 fileSize = 0;
+			if (pBestLayer->GetFs()->FileInfo(layerFilePath, &fInfo))
+			{
+				fileSize = fInfo.m_FileSize;
+			}
+			char logBuf[512];
+			_snprintf_s(logBuf, sizeof(logBuf), _TRUNCATE,
+				"[BlurModToolkit] Mod overlay Open: virtual='%s' -> physical='%s' (Size: %llu bytes, Layer: BlurModOverlay)\n",
+				filePath.Chars(), layerFilePath.Chars(), (unsigned long long)fileSize);
+			OutputDebugStringA(logBuf);
+			FILE* fLog = fopen("blur_mod_overlay.log", "a");
+			if (fLog)
+			{
+				fputs(logBuf, fLog);
+				fclose(fLog);
+			}
 		}
 
 		return pBestLayer->GetFs()->Open(layerFilePath, fileAccess, params);
@@ -636,6 +658,24 @@ C_OverlayLayer* C_OverlayFs::GetBestLayer(
 			if (strcmp(pLayer->GetName().Chars(), "BlurModOverlay") == 0)
 			{
 				LOGINFO(g_log, "[BlurModToolkit] Mod overlay hit: '%s' -> '%s'", filePath.Chars(), layerAbsoluteFilePath.Chars());
+
+				Sys::C_FileInfo fInfo;
+				U64 fileSize = 0;
+				if (pLayer->GetFs()->FileInfo(layerAbsoluteFilePath, &fInfo))
+				{
+					fileSize = fInfo.m_FileSize;
+				}
+				char logBuf[512];
+				_snprintf_s(logBuf, sizeof(logBuf), _TRUNCATE,
+					"[BlurModToolkit] Mod overlay hit: virtual='%s' -> physical='%s' (Size: %llu bytes, Layer: BlurModOverlay)\n",
+					filePath.Chars(), layerAbsoluteFilePath.Chars(), (unsigned long long)fileSize);
+				OutputDebugStringA(logBuf);
+				FILE* fLog = fopen("blur_mod_overlay.log", "a");
+				if (fLog)
+				{
+					fputs(logBuf, fLog);
+					fclose(fLog);
+				}
 			}
 
 			bestLayerAbsoluteFilePath = layerAbsoluteFilePath;

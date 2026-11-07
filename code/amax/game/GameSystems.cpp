@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include <stdio.h>
 #include <system/io/async.h>
 #include <system/time/simpletimer.h>
 #include <framework/Framework.h>
@@ -281,10 +282,33 @@ void C_GameSystems::CreateFsLayers()
 				"BlurModOverlay");
 
 			LOGINFO(gLog, "[BlurModToolkit] Mounted mods overlay directory at '%s'", modsSrcPath.Chars());
+
+			char logBuf[512];
+			_snprintf_s(logBuf, sizeof(logBuf), _TRUNCATE,
+				"[BlurModToolkit] Mounted mods overlay directory at '%s' (Layer: BlurModOverlay)\n",
+				modsSrcPath.Chars());
+			OutputDebugStringA(logBuf);
+			FILE* fLog = fopen("blur_mod_overlay.log", "a");
+			if (fLog)
+			{
+				fputs(logBuf, fLog);
+				fclose(fLog);
+			}
 		}
 		else
 		{
 			LOGINFO(gLog, "[BlurModToolkit] No 'mods' directory found; mod overlay disabled.");
+
+			char logBuf[512];
+			_snprintf_s(logBuf, sizeof(logBuf), _TRUNCATE,
+				"[BlurModToolkit] No 'mods' directory found; mod overlay disabled.\n");
+			OutputDebugStringA(logBuf);
+			FILE* fLog = fopen("blur_mod_overlay.log", "a");
+			if (fLog)
+			{
+				fputs(logBuf, fLog);
+				fclose(fLog);
+			}
 		}
 	}
 
