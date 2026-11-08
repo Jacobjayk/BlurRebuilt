@@ -607,6 +607,7 @@ C_VehicleActor::C_VehicleActor()
 	m_brakeControllerInput = 0.0f;
 	m_handbrakeControllerInput = 0.0f;
 	m_fSmoothedAssistSteer = 0.0f;
+	memset(&m_SteeringDiagnostic, 0, sizeof(m_SteeringDiagnostic));
 
 	m_IsBumperCamera = false;
 	m_EnableParticles = false;
@@ -3773,6 +3774,7 @@ Debug::Float g_debugVehicleTransverseGripScale("Vehicle.TransverseGripScale", -1
 Debug::Bool g_debugSteeringAssistantEnabled("Vehicle.SteeringAssistant.Enable", false);
 Debug::Int g_debugSteeringAssistantMode("Vehicle.SteeringAssistant.Mode", 0, Debug::Range(0, 3));
 Debug::Float g_debugSteeringAssistantRateLimit("Vehicle.SteeringAssistant.RateLimit", 3.5f, Debug::Range(0.5f, 10.0f), Debug::Step(0.1f));
+Debug::Bool g_debugSteeringAssistantLogTelemetry("Vehicle.SteeringAssistant.LogTelemetry", false);
 
 /*
 ===============
@@ -4047,31 +4049,114 @@ NOTE: Driver-assistive steering layer providing:
       4. Slew-rate limiting and failsafe emergency shutdown
 ===============================================================
 */
+void C_VehicleActor::LogSteeringTelemetry()
+{
+	static FILE* s_pSteeringLog = NULL;
+	static bool s_bSteeringLogChecked = false;
+	static bool s_bSteeringLogActive = false;
+
+	if (!s_bSteeringLogChecked)
+	{
+		s_bSteeringLogChecked = true;
+		char buf[64] = {0};
+		DWORD len = GetEnvironmentVariableA("BLUR_STEERING_TELEMETRY", buf, sizeof(buf));
+		if ((len > 0 && buf[0] != '0') || g_debugSteeringAssistantLogTelemetry)
+		{
+			s_bSteeringLogActive = true;
+			fopen_s(&s_pSteeringLog, "steering_telemetry.csv", "w");
+			if (s_pSteeringLog)
+			{
+				fprintf(s_pSteeringLog, "timestamp,enabled,mode,driverSteer,targetAssist,smoothedAssist,finalSteer,slipRatio,yawRate,speedMph,gear,throttle,brake,allWheelsOnGround,lockoutFlags\n");
+				fflush(s_pSteeringLog);
+			}
+		}
+	}
+
+	if (s_bSteeringLogActive && s_pSteeringLog)
+	{
+		fprintf(s_pSteeringLog, "%.4f,%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%d,%.2f,%.2f,%d,%d\n",
+			m_SteeringDiagnostic.timestamp,
+			m_SteeringDiagnostic.enabled,
+			m_SteeringDiagnostic.mode,
+			m_SteeringDiagnostic.driverSteer,
+			m_SteeringDiagnostic.targetAssist,
+			m_SteeringDiagnostic.smoothedAssist,
+			m_SteeringDiagnostic.finalSteer,
+			m_SteeringDiagnostic.slipRatio,
+			m_SteeringDiagnostic.yawRate,
+			m_SteeringDiagnostic.speedMph,
+			m_SteeringDiagnostic.gear,
+			m_SteeringDiagnostic.throttle,
+			m_SteeringDiagnostic.brake,
+			m_SteeringDiagnostic.allWheelsOnGround,
+			m_SteeringDiagnostic.lockoutFlags);
+		fflush(s_pSteeringLog);
+	}
+}
+
 void C_VehicleActor::ApplySteeringAssistant(RacingPhysics::CarControls* pControls)
 {
-	if (!g_debugSteeringAssistantEnabled || (int)g_debugSteeringAssistantMode <= 0)
+	float driverSteer = pControls ? pControls->steer : 0.0f;
+	float throttle = pControls ? pControls->throttle : 0.0f;
+	float brake = pControls ? pControls->brake : 0.0f;
+	Vehicle::C_ModelInput* pInput = m_pVehicleModel ? m_pVehicleModel->GetModelInput() : NULL;
+	int gear = pInput ? pInput->m_iGear : 0;
+	float speedMph = pInput ? pInput->m_fSpeed : 0.0f;
+	bool allGrounded = pInput ? pInput->m_bAllWheelsOnGround : false;
+	int mode = (int)g_debugSteeringAssistantMode;
+	bool enabled = g_debugSteeringAssistantEnabled && mode > 0;
+
+	// Populate baseline diagnostic fields
+	m_SteeringDiagnostic.timestamp = m_fTime;
+	m_SteeringDiagnostic.enabled = enabled ? 1 : 0;
+	m_SteeringDiagnostic.mode = mode;
+	m_SteeringDiagnostic.driverSteer = driverSteer;
+	m_SteeringDiagnostic.gear = gear;
+	m_SteeringDiagnostic.throttle = throttle;
+	m_SteeringDiagnostic.brake = brake;
+	m_SteeringDiagnostic.allWheelsOnGround = allGrounded ? 1 : 0;
+	m_SteeringDiagnostic.speedMph = speedMph;
+
+	if (!enabled)
 	{
 		m_fSmoothedAssistSteer = 0.0f;
+		m_SteeringDiagnostic.targetAssist = 0.0f;
+		m_SteeringDiagnostic.smoothedAssist = 0.0f;
+		m_SteeringDiagnostic.finalSteer = driverSteer;
+		m_SteeringDiagnostic.slipRatio = 0.0f;
+		m_SteeringDiagnostic.yawRate = 0.0f;
+		m_SteeringDiagnostic.lockoutFlags = 1; // Bit 0: Disabled/Off
+		LogSteeringTelemetry();
 		return;
 	}
 
-	if (!pControls || !m_pVehiclePhysics || !m_pVehicleModel)
+	if (!pControls || !m_pVehiclePhysics || !m_pVehicleModel || !pInput)
 		return;
 
 	if (!m_ControlsEnabled || m_Eliminated || m_FatallyDamaged)
 	{
 		m_fSmoothedAssistSteer = 0.0f;
+		m_SteeringDiagnostic.targetAssist = 0.0f;
+		m_SteeringDiagnostic.smoothedAssist = 0.0f;
+		m_SteeringDiagnostic.finalSteer = driverSteer;
+		m_SteeringDiagnostic.slipRatio = 0.0f;
+		m_SteeringDiagnostic.yawRate = 0.0f;
+		m_SteeringDiagnostic.lockoutFlags = 32; // Bit 5: ControlsDisabled / Eliminated
+		LogSteeringTelemetry();
 		return;
 	}
 
-	Vehicle::C_ModelInput* pInput = m_pVehicleModel->GetModelInput();
-	if (!pInput)
-		return;
-
 	// Failsafe 1: Ground contact check - Never intervene while airborne
-	if (!pInput->m_bAllWheelsOnGround)
+	if (!allGrounded)
 	{
 		m_fSmoothedAssistSteer = 0.0f;
+		m_SteeringDiagnostic.targetAssist = 0.0f;
+		m_SteeringDiagnostic.smoothedAssist = 0.0f;
+		m_SteeringDiagnostic.finalSteer = driverSteer;
+		m_SteeringDiagnostic.slipRatio = 0.0f;
+		m_SteeringDiagnostic.yawRate = 0.0f;
+		m_SteeringDiagnostic.lockoutFlags = 2; // Bit 1: Airborne
+		LogSteeringTelemetry();
 		return;
 	}
 
@@ -4079,23 +4164,43 @@ void C_VehicleActor::ApplySteeringAssistant(RacingPhysics::CarControls* pControl
 	if (pInput->m_fMagVelocity < 3.0f)
 	{
 		m_fSmoothedAssistSteer = 0.0f;
+		m_SteeringDiagnostic.targetAssist = 0.0f;
+		m_SteeringDiagnostic.smoothedAssist = 0.0f;
+		m_SteeringDiagnostic.finalSteer = driverSteer;
+		m_SteeringDiagnostic.slipRatio = 0.0f;
+		m_SteeringDiagnostic.yawRate = 0.0f;
+		m_SteeringDiagnostic.lockoutFlags = 4; // Bit 2: Low-speed
+		LogSteeringTelemetry();
 		return;
 	}
 
 	// Failsafe 3: Reverse gear lockout
-	if (pInput->m_iGear < 0)
+	if (gear < 0)
 	{
 		m_fSmoothedAssistSteer = 0.0f;
+		m_SteeringDiagnostic.targetAssist = 0.0f;
+		m_SteeringDiagnostic.smoothedAssist = 0.0f;
+		m_SteeringDiagnostic.finalSteer = driverSteer;
+		m_SteeringDiagnostic.slipRatio = 0.0f;
+		m_SteeringDiagnostic.yawRate = 0.0f;
+		m_SteeringDiagnostic.lockoutFlags = 8; // Bit 3: Reverse
+		LogSteeringTelemetry();
 		return;
 	}
 
-	float driverSteer = pControls->steer;
 	float absDriver = Maths::Abs(driverSteer);
 
 	// Driver Override: Full lock (> 0.85) yields 100% human authority
 	if (absDriver > 0.85f)
 	{
 		m_fSmoothedAssistSteer = 0.0f;
+		m_SteeringDiagnostic.targetAssist = 0.0f;
+		m_SteeringDiagnostic.smoothedAssist = 0.0f;
+		m_SteeringDiagnostic.finalSteer = driverSteer;
+		m_SteeringDiagnostic.slipRatio = 0.0f;
+		m_SteeringDiagnostic.yawRate = 0.0f;
+		m_SteeringDiagnostic.lockoutFlags = 16; // Bit 4: Driver Override
+		LogSteeringTelemetry();
 		return;
 	}
 
@@ -4120,13 +4225,11 @@ void C_VehicleActor::ApplySteeringAssistant(RacingPhysics::CarControls* pControl
 
 	// Mode authority gain
 	float modeGain = 0.0f;
-	int mode = (int)g_debugSteeringAssistantMode;
 	if (mode == 1) modeGain = 0.15f;       // Gentle (15% authority)
 	else if (mode == 2) modeGain = 0.35f;  // Normal (35% authority)
 	else if (mode >= 3) modeGain = 0.60f;  // Strong (60% authority)
 
 	// Speed-sensitive steering scale (> 100 mph attenuates rapid turns to prevent spin)
-	float speedMph = pInput->m_fSpeed;
 	float speedFactor = 1.0f;
 	if (speedMph > 100.0f)
 	{
@@ -4143,7 +4246,18 @@ void C_VehicleActor::ApplySteeringAssistant(RacingPhysics::CarControls* pControl
 	m_fSmoothedAssistSteer += stepDelta;
 
 	// Apply assistance and clamp safely to [-1.0, 1.0]
-	pControls->steer = Maths::Clamp(driverSteer + m_fSmoothedAssistSteer, -1.0f, 1.0f);
+	float finalSteer = Maths::Clamp(driverSteer + m_fSmoothedAssistSteer, -1.0f, 1.0f);
+	pControls->steer = finalSteer;
+
+	// Populate active diagnostics
+	m_SteeringDiagnostic.targetAssist = targetAssistSteer;
+	m_SteeringDiagnostic.smoothedAssist = m_fSmoothedAssistSteer;
+	m_SteeringDiagnostic.finalSteer = finalSteer;
+	m_SteeringDiagnostic.slipRatio = slipRatio;
+	m_SteeringDiagnostic.yawRate = yawRate;
+	m_SteeringDiagnostic.lockoutFlags = 0; // Active, no lockout
+
+	LogSteeringTelemetry();
 }
 
 /*

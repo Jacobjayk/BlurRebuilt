@@ -695,6 +695,28 @@ public:
 	float										m_handbrakeControllerInput;
 	float										m_fSmoothedAssistSteer;
 
+	struct S_SteeringAssistantDiagnostic
+	{
+		float timestamp;
+		int enabled;
+		int mode;
+		float driverSteer;
+		float targetAssist;
+		float smoothedAssist;
+		float finalSteer;
+		float slipRatio;
+		float yawRate;
+		float speedMph;
+		int gear;
+		float throttle;
+		float brake;
+		int allWheelsOnGround;
+		int lockoutFlags;
+	};
+
+	S_SteeringAssistantDiagnostic				m_SteeringDiagnostic;
+	const S_SteeringAssistantDiagnostic&		GetSteeringDiagnostic() const { return m_SteeringDiagnostic; }
+
 	Collision::C_CollisionFilter				m_BodyCollisionFilter;
 	Collision::C_CollisionFilter				m_ObjectCollisionFilter;
 	Collision::C_CollisionFilter				m_VehicleCollisionFilter;
@@ -756,6 +778,7 @@ private:
 	void										CreateAIDriver();
 	void										ApplyPerformanceModifiers(RacingPhysics::CarControls* pControls);
 	void										ApplySteeringAssistant(RacingPhysics::CarControls* pControls);
+	void										LogSteeringTelemetry();
 	
 
 	void										UpdatePickupSFX(const float frameTime);
