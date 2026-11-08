@@ -606,6 +606,7 @@ C_VehicleActor::C_VehicleActor()
 	m_accelControllerInput = 0.0f;
 	m_brakeControllerInput = 0.0f;
 	m_handbrakeControllerInput = 0.0f;
+	m_fSmoothedAssistSteer = 0.0f;
 
 	m_IsBumperCamera = false;
 	m_EnableParticles = false;
@@ -3769,6 +3770,10 @@ Debug::Logger &g_AssistBoostLog(Debug::GetLogger("Amax.Multiplayer.Balance2"));
 
 Debug::Float g_debugVehicleTransverseGripScale("Vehicle.TransverseGripScale", -1.0f, Debug::Range(0.0f, 2.0f), Debug::Step(0.001f));
 
+Debug::Bool g_debugSteeringAssistantEnabled("Vehicle.SteeringAssistant.Enable", false);
+Debug::Int g_debugSteeringAssistantMode("Vehicle.SteeringAssistant.Mode", 0, Debug::Range(0, 3));
+Debug::Float g_debugSteeringAssistantRateLimit("Vehicle.SteeringAssistant.RateLimit", 3.5f, Debug::Range(0.5f, 10.0f), Debug::Step(0.1f));
+
 /*
 ===============
 NAME: ApplyPerformanceModifiers
@@ -4031,7 +4036,115 @@ void C_VehicleActor::ApplyPerformanceModifiers(RacingPhysics::CarControls* pCont
 	*/
 }
 
+/*
+===============================================================
+NAME: ApplySteeringAssistant
 
+NOTE: Driver-assistive steering layer providing:
+      1. Yaw rate damping & drift counter-steer stabilization
+      2. Speed-sensitive steering angle attenuation
+      3. Smooth driver override authority (100% human control on active input)
+      4. Slew-rate limiting and failsafe emergency shutdown
+===============================================================
+*/
+void C_VehicleActor::ApplySteeringAssistant(RacingPhysics::CarControls* pControls)
+{
+	if (!g_debugSteeringAssistantEnabled || (int)g_debugSteeringAssistantMode <= 0)
+	{
+		m_fSmoothedAssistSteer = 0.0f;
+		return;
+	}
+
+	if (!pControls || !m_pVehiclePhysics || !m_pVehicleModel)
+		return;
+
+	if (!m_ControlsEnabled || m_Eliminated || m_FatallyDamaged)
+	{
+		m_fSmoothedAssistSteer = 0.0f;
+		return;
+	}
+
+	Vehicle::C_ModelInput* pInput = m_pVehicleModel->GetModelInput();
+	if (!pInput)
+		return;
+
+	// Failsafe 1: Ground contact check - Never intervene while airborne
+	if (!pInput->m_bAllWheelsOnGround)
+	{
+		m_fSmoothedAssistSteer = 0.0f;
+		return;
+	}
+
+	// Failsafe 2: Low-speed parking / standing still lockout (< 3.0 m/s ~ 6.7 mph)
+	if (pInput->m_fMagVelocity < 3.0f)
+	{
+		m_fSmoothedAssistSteer = 0.0f;
+		return;
+	}
+
+	// Failsafe 3: Reverse gear lockout
+	if (pInput->m_iGear < 0)
+	{
+		m_fSmoothedAssistSteer = 0.0f;
+		return;
+	}
+
+	float driverSteer = pControls->steer;
+	float absDriver = Maths::Abs(driverSteer);
+
+	// Driver Override: Full lock (> 0.85) yields 100% human authority
+	if (absDriver > 0.85f)
+	{
+		m_fSmoothedAssistSteer = 0.0f;
+		return;
+	}
+
+	// Proportional driver authority handover [0.15 .. 0.85]
+	float driverAuthority = Maths::Clamp((absDriver - 0.15f) / 0.70f, 0.0f, 1.0f);
+
+	// Vehicle dynamics orientation & velocities
+	const Maths::HMat43& mat = pInput->m_mMatrix;
+	Maths::HVec3 fwd = mat.AZ();
+	Maths::HVec3 right = mat.AX();
+	const Maths::HVec3& vel = pInput->m_vVelocity;
+	const Maths::HVec3& angVel = pInput->m_vAngularVelocity;
+
+	float vFwd = fwd | vel;
+	float vLat = right | vel;
+	float yawRate = angVel.Y();
+	float slipRatio = vLat / Maths::Max(Maths::Abs(vFwd), 1.0f);
+
+	// Counter-steer stabilization & yaw rate damping calculation
+	float assistTarget = -slipRatio * 0.75f - yawRate * 0.10f;
+	assistTarget = Maths::Clamp(assistTarget, -1.0f, 1.0f);
+
+	// Mode authority gain
+	float modeGain = 0.0f;
+	int mode = (int)g_debugSteeringAssistantMode;
+	if (mode == 1) modeGain = 0.15f;       // Gentle (15% authority)
+	else if (mode == 2) modeGain = 0.35f;  // Normal (35% authority)
+	else if (mode >= 3) modeGain = 0.60f;  // Strong (60% authority)
+
+	// Speed-sensitive steering scale (> 100 mph attenuates rapid turns to prevent spin)
+	float speedMph = pInput->m_fSpeed;
+	float speedFactor = 1.0f;
+	if (speedMph > 100.0f)
+	{
+		speedFactor = Maths::Clamp(1.0f - ((speedMph - 100.0f) / 120.0f) * 0.35f, 0.65f, 1.0f);
+	}
+
+	// Compute effective assistive delta with driver override and speed factor
+	float targetAssistSteer = assistTarget * modeGain * (1.0f - driverAuthority) * speedFactor;
+
+	// Slew-rate limiting to prevent high-frequency chatter or snap reversal
+	float maxRate = Maths::Max((float)g_debugSteeringAssistantRateLimit, 0.5f);
+	float maxStep = maxRate * Maths::Max(m_FrameTime, 0.001f);
+	float stepDelta = Maths::Clamp(targetAssistSteer - m_fSmoothedAssistSteer, -maxStep, maxStep);
+	m_fSmoothedAssistSteer += stepDelta;
+
+	// Apply assistance and clamp safely to [-1.0, 1.0]
+	pControls->steer = Maths::Clamp(driverSteer + m_fSmoothedAssistSteer, -1.0f, 1.0f);
+}
 
 /*
 ===============
@@ -8120,6 +8233,7 @@ bool C_VehicleActor::OnMessage(const Messaging::C_MessageBase *pMessage)
 				}
 
 				ApplyPerformanceModifiers(&controls);
+				ApplySteeringAssistant(&controls);
 
 				BIZ_PANIC(controls.throttle >= 0.0f && controls.throttle <= 1.0f);
 				//NetworkTests();
@@ -8173,6 +8287,7 @@ bool C_VehicleActor::OnMessage(const Messaging::C_MessageBase *pMessage)
 				if (m_pVehiclePhysics->GetControlType() == RacingPhysics::Vehicle::CONTROL_TYPE_AI)
 				{
 					ApplyPerformanceModifiers(&controls);
+				ApplySteeringAssistant(&controls);
 				}
 
 				BIZ_PANIC(controls.throttle >= 0.0f && controls.throttle <= 1.0f);

@@ -693,6 +693,7 @@ public:
 	float										m_accelControllerInput;
 	float										m_brakeControllerInput;
 	float										m_handbrakeControllerInput;
+	float										m_fSmoothedAssistSteer;
 
 	Collision::C_CollisionFilter				m_BodyCollisionFilter;
 	Collision::C_CollisionFilter				m_ObjectCollisionFilter;
@@ -754,6 +755,7 @@ private:
 
 	void										CreateAIDriver();
 	void										ApplyPerformanceModifiers(RacingPhysics::CarControls* pControls);
+	void										ApplySteeringAssistant(RacingPhysics::CarControls* pControls);
 	
 
 	void										UpdatePickupSFX(const float frameTime);
