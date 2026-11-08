@@ -5,6 +5,7 @@
 #include "stdafx.h"
 
 #include "system/automation/Automation.h"
+#include <system/time/Time.h>
 
 #include <Game/GameActors/Vehicles/VehicleActor.h>
 
@@ -4107,7 +4108,14 @@ void C_VehicleActor::ApplySteeringAssistant(RacingPhysics::CarControls* pControl
 	bool enabled = g_debugSteeringAssistantEnabled && mode > 0;
 
 	// Populate baseline diagnostic fields
-	m_SteeringDiagnostic.timestamp = m_fTime;
+	static Time::C_Time s_uSteeringLogStartTime = 0;
+	Time::C_Time uCurrentTime = Time::GetPerformanceCounter();
+	if (s_uSteeringLogStartTime == 0)
+	{
+		s_uSteeringLogStartTime = uCurrentTime;
+	}
+	float curTimestamp = (float)((double)(uCurrentTime - s_uSteeringLogStartTime) / (double)SYS_USEC_PER_SEC);
+	m_SteeringDiagnostic.timestamp = curTimestamp;
 	m_SteeringDiagnostic.enabled = enabled ? 1 : 0;
 	m_SteeringDiagnostic.mode = mode;
 	m_SteeringDiagnostic.driverSteer = driverSteer;
